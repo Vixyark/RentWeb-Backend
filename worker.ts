@@ -1,4 +1,5 @@
 
+
 import { Router, IRequest } from 'itty-router';
 // NOTE: In a real Cloudflare Worker, you'd use `hono/jwt` or a similar robust library for JWT.
 // For this example, we'll use a simplified conceptual JWT handling.
@@ -123,12 +124,41 @@ const FIXED_DEPOSIT_AMOUNT = (env: Env) => parseInt(env.FIXED_DEPOSIT_AMOUNT || 
 */
 
 
-// --- JWT Utilities (Simplified) ---
-// In a real app, use a proper JWT library and consider key rotation, algorithm choices, etc.
+// --- JWT Utilities (Simplified & Refactored) ---
+
+function arrayBufferToBase64Url(buffer: ArrayBuffer): string {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, ''); // Remove trailing padding
+}
+
+function base64UrlToUint8Array(base64Url: string): Uint8Array {
+  let base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+  // Add padding if necessary
+  while (base64.length % 4) {
+    base64 += '=';
+  }
+  const binary_string = atob(base64);
+  const len = binary_string.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binary_string.charCodeAt(i);
+  }
+  return bytes;
+}
+
 const generateJwt = async (payload: object, secret: string): Promise<string> => {
   const header = { alg: 'HS256', typ: 'JWT' };
-  const encodedHeader = btoa(JSON.stringify(header)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
-  const encodedPayload = btoa(JSON.stringify(payload)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+  
+  const encodedHeader = arrayBufferToBase64Url(new TextEncoder().encode(JSON.stringify(header)));
+  const encodedPayload = arrayBufferToBase64Url(new TextEncoder().encode(JSON.stringify(payload)));
   
   const key = await crypto.subtle.importKey(
     'raw', 
@@ -137,12 +167,12 @@ const generateJwt = async (payload: object, secret: string): Promise<string> => 
     false, 
     ['sign']
   );
-  const signature = await crypto.subtle.sign(
+  const signatureBuffer = await crypto.subtle.sign(
     'HMAC', 
     key, 
     new TextEncoder().encode(`${encodedHeader}.${encodedPayload}`)
   );
-  const encodedSignature = btoa(String.fromCharCode(...new Uint8Array(signature))).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+  const encodedSignature = arrayBufferToBase64Url(signatureBuffer);
   
   return `${encodedHeader}.${encodedPayload}.${encodedSignature}`;
 };
@@ -150,7 +180,10 @@ const generateJwt = async (payload: object, secret: string): Promise<string> => 
 const verifyJwt = async (token: string, secret: string): Promise<any | null> => {
   try {
     const [encodedHeader, encodedPayload, encodedSignature] = token.split('.');
-    if (!encodedHeader || !encodedPayload || !encodedSignature) return null;
+    if (!encodedHeader || !encodedPayload || !encodedSignature) {
+      console.log("JWT token structure invalid.");
+      return null;
+    }
 
     const key = await crypto.subtle.importKey(
       'raw',
@@ -159,23 +192,31 @@ const verifyJwt = async (token: string, secret: string): Promise<any | null> => 
       false,
       ['verify']
     );
+
+    const signatureToVerify = base64UrlToUint8Array(encodedSignature);
+
     const isValid = await crypto.subtle.verify(
       'HMAC',
       key,
-      (new Uint8Array(atob(encodedSignature.replace(/-/g, '+').replace(/_/g, '/')).split('').map(c => c.charCodeAt(0)))).buffer,
+      signatureToVerify.buffer, // Use .buffer or the TypedArray itself
       new TextEncoder().encode(`${encodedHeader}.${encodedPayload}`)
     );
 
-    if (!isValid) return null;
+    if (!isValid) {
+      console.log("JWT signature verification failed.");
+      return null;
+    }
+    
+    const payloadString = new TextDecoder().decode(base64UrlToUint8Array(encodedPayload));
+    const payload = JSON.parse(payloadString);
 
-    const payload = JSON.parse(atob(encodedPayload.replace(/-/g, '+').replace(/_/g, '/')));
-    // Check expiry if 'exp' claim is present
     if (payload.exp && Date.now() >= payload.exp * 1000) {
-      return null; // Token expired
+      console.log("JWT token expired.");
+      return null; 
     }
     return payload;
-  } catch (error) {
-    console.error('JWT verification error:', error);
+  } catch (error: any) {
+    console.error('JWT verification error:', error.message, error.stack);
     return null;
   }
 };
@@ -198,6 +239,10 @@ const authMiddleware = async (request: IRequest, env: Env, context: ExecutionCon
     return new Response(JSON.stringify({ error: 'Unauthorized: Missing or invalid token' }), { status: 401 });
   }
   const token = authHeader.substring(7);
+  if (!env.JWT_SECRET) { // Added check here as well for safety
+      console.error("CRITICAL: JWT_SECRET is not configured in authMiddleware.");
+      return new Response(JSON.stringify({ error: 'Server configuration error.' }), { status: 500 });
+  }
   const payload = await verifyJwt(token, env.JWT_SECRET);
   if (!payload || payload.id !== env.ADMIN_ID) { // Simple check, could be more robust
     return new Response(JSON.stringify({ error: 'Unauthorized: Invalid or expired token' }), { status: 401 });
@@ -234,13 +279,33 @@ const calculateRentalCosts = (selectedItems: SelectedItemEntry[], allDbItems: It
 
 // Auth
 router.post('/api/auth/login', async (request: IRequest, env: Env) => {
-  const { id, password } = await request.json() as any;
-  if (id === env.ADMIN_ID && password === env.ADMIN_PASSWORD) {
-    const jwtPayload = { id: env.ADMIN_ID, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24) }; // Expires in 24 hours
-    const token = await generateJwt(jwtPayload, env.JWT_SECRET);
-    return new Response(JSON.stringify({ token }), { headers: { 'Content-Type': 'application/json' } });
+  if (!env.ADMIN_ID || !env.ADMIN_PASSWORD || !env.JWT_SECRET) {
+    console.error("CRITICAL: Missing one or more required environment secrets for login (ADMIN_ID, ADMIN_PASSWORD, JWT_SECRET). Please configure them in Cloudflare Worker settings.");
+    return new Response(JSON.stringify({ error: 'Server configuration error.' }), { status: 500 });
   }
-  return new Response(JSON.stringify({ error: 'Invalid credentials' }), { status: 401 });
+
+  try {
+    const body = await request.json() as any;
+    const { id, password } = body;
+
+    if (id === env.ADMIN_ID && password === env.ADMIN_PASSWORD) {
+      const jwtPayload = { 
+        id: env.ADMIN_ID, 
+        iat: Math.floor(Date.now() / 1000), 
+        exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24) // Expires in 24 hours
+      };
+      const token = await generateJwt(jwtPayload, env.JWT_SECRET);
+      return new Response(JSON.stringify({ token }), { headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ error: 'Invalid credentials' }), { status: 401 });
+  } catch (e: any) {
+    console.error("Error in /api/auth/login handler:", e.message, e.cause ? e.cause : '', e.stack ? e.stack : '');
+    // Check if error is due to request.json() failing (e.g. invalid JSON in request body)
+    if (e instanceof SyntaxError && e.message.includes("JSON")) {
+        return new Response(JSON.stringify({ error: 'Invalid request body: Expected JSON.' }), { status: 400 });
+    }
+    return new Response(JSON.stringify({ error: 'Login processing failed.', details: e.message }), { status: 500 });
+  }
 });
 
 // Items - Admin Only
