@@ -1,0 +1,16 @@
+name = "kaist-welfare-rental-api" # 워커의 원하는 이름
+main = "worker.ts" # 엔트리 포인트 파일 (경로가 다르면 수정)
+compatibility_date = "2025-06-12" # 또는 최신 호환성 날짜
+
+# D1 데이터베이스 바인딩
+# Cloudflare 대시보드에서 D1 데이터베이스를 먼저 생성해야 합니다.
+# 예: `kaist-rental-db` 라는 이름으로 D1 DB를 생성했다고 가정
+[[d1_databases]]
+binding = "DB" # worker.ts 에서 접근할 때 사용할 이름 (env.DB)
+database_name = "kaist-rental-db"
+database_id = "7a0b01ed-d5f5-4505-92fe-4fabefcb21ad" # 대시보드에서 확인 가능
+
+# 환경 변수 (Secrets)
+# 실제 값은 Cloudflare 대시보드 또는 `wrangler secret put <KEY>` 명령어로 설정합니다.
+[vars]
+FIXED_DEPOSIT_AMOUNT = "10000" # 예시 값
